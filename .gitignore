@@ -136,8 +136,11 @@ dist
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
-
+.env.example
 # Vite files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+COMPREHENSIVE_ENDPOINT_TEST_REPORT.md
+VERSION_1_1_ENDPOINT_TEST_REPORT.md
