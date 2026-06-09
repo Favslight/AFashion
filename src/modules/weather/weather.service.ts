@@ -24,34 +24,23 @@ export async function getCurrentWeather(location: string) {
     throw error;
   }
 
-  const response = await fetch(`https://api.weatherapi.com/v1/current.json?key=${encodeURIComponent(env.WEATHER_API_KEY)}&q=${encodeURIComponent(location)}&aqi=no`);
-  if (!response.ok) {
-    const error = new Error("Unable to fetch current weather");
-    (error as Error & { statusCode?: number }).statusCode = 502;
-    throw error;
-  }
-
-  const raw = await response.json() as {
-    location?: { name?: string; region?: string; country?: string; localtime?: string };
-    current?: {
-      temp_c?: number;
-      feelslike_c?: number;
-      humidity?: number;
-      wind_kph?: number;
-      precip_mm?: number;
-      condition?: { text?: string };
-    };
-  };
+  const raw = await fetchOpenWeather(location);
 
   const weatherData = {
-    location: raw.location,
-    temperature_c: raw.current?.temp_c,
-    feels_like_c: raw.current?.feelslike_c,
-    humidity: raw.current?.humidity,
-    wind_kph: raw.current?.wind_kph,
-    precipitation_mm: raw.current?.precip_mm,
-    condition: raw.current?.condition?.text,
-    source: "weatherapi.com"
+    location: {
+      name: raw.name,
+      country: raw.sys?.country,
+      coordinates: raw.coord,
+      timezone_offset_seconds: raw.timezone,
+      observed_at_unix: raw.dt
+    },
+    temperature_c: raw.main?.temp,
+    feels_like_c: raw.main?.feels_like,
+    humidity: raw.main?.humidity,
+    wind_kph: raw.wind?.speed !== undefined ? Math.round(raw.wind.speed * 3.6 * 10) / 10 : undefined,
+    precipitation_mm: raw.rain?.["1h"] ?? raw.snow?.["1h"] ?? 0,
+    condition: raw.weather?.[0]?.description ?? raw.weather?.[0]?.main,
+    source: "openweathermap.org"
   };
 
   await queryOne(
@@ -62,6 +51,64 @@ export async function getCurrentWeather(location: string) {
   );
 
   return weatherData;
+}
+
+type OpenWeatherResponse = {
+  name?: string;
+  dt?: number;
+  timezone?: number;
+  coord?: {
+    lon?: number;
+    lat?: number;
+  };
+  weather?: Array<{
+    main?: string;
+    description?: string;
+    icon?: string;
+  }>;
+  main?: {
+    temp?: number;
+    feels_like?: number;
+    humidity?: number;
+  };
+  wind?: {
+    speed?: number;
+  };
+  rain?: {
+    "1h"?: number;
+  };
+  snow?: {
+    "1h"?: number;
+  };
+  sys?: {
+    country?: string;
+  };
+};
+
+async function fetchOpenWeather(location: string) {
+  const candidates = location.includes(",") ? [location] : [location, `${location},NG`];
+
+  for (const candidate of candidates) {
+    const url = new URL("https://api.openweathermap.org/data/2.5/weather");
+    url.searchParams.set("q", candidate);
+    url.searchParams.set("appid", env.WEATHER_API_KEY);
+    url.searchParams.set("units", "metric");
+
+    const response = await fetch(url);
+    if (response.ok) {
+      return await response.json() as OpenWeatherResponse;
+    }
+
+    if (response.status !== 404 || candidate === candidates[candidates.length - 1]) {
+      const error = new Error(`Unable to fetch current weather from OpenWeatherMap (${response.status})`);
+      (error as Error & { statusCode?: number }).statusCode = response.status === 401 ? 503 : 502;
+      throw error;
+    }
+  }
+
+  const error = new Error("Unable to fetch current weather from OpenWeatherMap");
+  (error as Error & { statusCode?: number }).statusCode = 502;
+  throw error;
 }
 
 export async function getWeatherStyleAdvice(userId: string, input: {

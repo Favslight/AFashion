@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import type { AppModule } from "@/data/backendRoutes";
 import { apiRequest, toJsonBody, type ApiMode } from "@/lib/api";
 import { AppShell } from "@/components/app/AppShell";
@@ -137,6 +137,90 @@ function fieldOptions(field: ActionField, loaded: Record<string, unknown>) {
   return [...staticOptions, ...sourceOptions];
 }
 
+function orderedMultipartData(source: FormData, fields: ActionField[]) {
+  const ordered = new FormData();
+
+  fields
+    .filter((field) => field.type !== "file")
+    .forEach((field) => {
+      const value = source.get(field.name);
+      if (value !== null && value !== "" && value !== undefined) {
+        ordered.append(field.name, value);
+      }
+    });
+
+  fields
+    .filter((field) => field.type === "file")
+    .forEach((field) => {
+      const values = source.getAll(field.name);
+      values.forEach((value) => {
+        if (value instanceof File && value.size > 0) {
+          ordered.append(field.name, value);
+        }
+      });
+    });
+
+  return ordered;
+}
+
+function titleCase(value: string) {
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function extractCollection(value: unknown) {
+  if (Array.isArray(value)) {
+    return value as Array<Record<string, unknown>>;
+  }
+
+  if (value && typeof value === "object") {
+    const firstCollection = Object.values(value as Record<string, unknown>).find(Array.isArray);
+    if (Array.isArray(firstCollection)) {
+      return firstCollection as Array<Record<string, unknown>>;
+    }
+  }
+
+  return [];
+}
+
+function readableRecordTitle(record: Record<string, unknown>) {
+  const value = record.name ?? record.title ?? record.full_name ?? record.email ?? record.occasion ?? record.event_type ?? "Saved item";
+  return String(value);
+}
+
+function readableRecordMeta(record: Record<string, unknown>) {
+  const keys = ["category", "color", "status", "plan_name", "occasion", "event_type", "location", "created_at"];
+  const parts = keys
+    .map((key) => {
+      const value = readPathValue(record, key);
+      if (value === undefined || value === null || String(value).trim() === "") {
+        return "";
+      }
+
+      return `${titleCase(key)}: ${String(value)}`;
+    })
+    .filter(Boolean);
+
+  return parts.slice(0, 3);
+}
+
+function summarizeResult(value: unknown, fallback: string) {
+  const collection = extractCollection(value);
+  if (collection.length) {
+    return `${collection.length} record${collection.length === 1 ? "" : "s"} available.`;
+  }
+
+  if (value && typeof value === "object") {
+    const record = Object.values(value as Record<string, unknown>).find((entry) => entry && typeof entry === "object" && !Array.isArray(entry));
+    if (record && typeof record === "object") {
+      return `${readableRecordTitle(record as Record<string, unknown>)} saved and refreshed.`;
+    }
+  }
+
+  return fallback;
+}
+
 function ActionForm({
   action,
   onComplete,
@@ -144,7 +228,7 @@ function ActionForm({
   loaded,
 }: {
   action: ModuleAction;
-  onComplete: (value: unknown) => void;
+  onComplete: (value: unknown, message: string, action: ModuleAction) => Promise<void> | void;
   fallbackMode: ApiMode;
   loaded: Record<string, unknown>;
 }) {
@@ -170,7 +254,7 @@ function ActionForm({
         .map((field) => [field.name, coerceValue(field, data.get(field.name))] as const);
       const payloadOnly = bodyEntries.length === 1 && bodyEntries[0]?.[0] === "payload";
       const requestBody = action.multipart
-        ? data
+        ? orderedMultipartData(data, fields)
         : payloadOnly
           ? JSON.stringify(bodyEntries[0]?.[1] ?? {})
           : toJsonBody(Object.fromEntries(bodyEntries));
@@ -182,7 +266,7 @@ function ActionForm({
       });
 
       setMessage(response.message);
-      onComplete(response.data);
+      await onComplete(response.data, response.message, action);
       if (action.method !== "GET") {
         form.reset();
       }
@@ -291,6 +375,15 @@ function getStatus(value: unknown) {
 
 function DataStatusCard({ title, value }: { title: string; value: unknown }) {
   const status = getStatus(value);
+  const collection = extractCollection(value);
+  const record = !collection.length && value && typeof value === "object"
+    ? Object.values(value as Record<string, unknown>).find((entry) => entry && typeof entry === "object" && !Array.isArray(entry))
+    : null;
+  const previewRecords = collection.length
+    ? collection.slice(0, 3)
+    : record && typeof record === "object"
+      ? [record as Record<string, unknown>]
+      : [];
 
   return (
     <Card className="p-5">
@@ -301,6 +394,22 @@ function DataStatusCard({ title, value }: { title: string; value: unknown }) {
         </span>
       </div>
       <p className="mt-4 text-sm leading-7 text-charcoal/58">{status.detail}</p>
+      {previewRecords.length ? (
+        <div className="mt-4 space-y-3">
+          {previewRecords.map((entry, index) => (
+            <div key={String(entry.id ?? index)} className="rounded-2xl border border-black/[0.06] bg-charcoal/[0.025] p-3">
+              <p className="truncate text-sm font-black text-charcoal">{readableRecordTitle(entry)}</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {readableRecordMeta(entry).map((meta) => (
+                  <span key={meta} className="rounded-full bg-white px-2.5 py-1 text-[11px] font-bold text-charcoal/55">
+                    {meta}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </Card>
   );
 }
@@ -312,34 +421,38 @@ export function ModulePage({ module, mode = "user", loads, actions = [] }: Modul
   const [loading, setLoading] = useState(false);
   const [lastResult, setLastResult] = useState("");
 
-  useEffect(() => {
-    let mounted = true;
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    const results: Record<string, unknown> = {};
 
-    async function load() {
-      setLoading(true);
-      const results: Record<string, unknown> = {};
-
-      for (const target of loadTargets) {
-        try {
-          const response = await apiRequest(target.path, { mode: target.mode ?? mode });
-          results[target.title] = response.data;
-        } catch (error) {
-          results[target.title] = { error: error instanceof Error ? error.message : "Unable to load" };
-        }
-      }
-
-      if (mounted) {
-        setLoaded(results);
-        setLoading(false);
+    for (const target of loadTargets) {
+      try {
+        const response = await apiRequest(target.path, { mode: target.mode ?? mode });
+        results[target.title] = response.data;
+      } catch (error) {
+        results[target.title] = { error: error instanceof Error ? error.message : "Unable to load" };
       }
     }
 
-    load();
+    setLoaded(results);
+    setLoading(false);
+  }, [loadTargets, mode]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function guardedLoad() {
+      if (mounted) {
+        await loadData();
+      }
+    }
+
+    guardedLoad();
 
     return () => {
       mounted = false;
     };
-  }, [loadTargets, mode]);
+  }, [loadData]);
 
   const Icon = module.icon;
 
@@ -389,7 +502,12 @@ export function ModulePage({ module, mode = "user", loads, actions = [] }: Modul
                 action={action}
                 fallbackMode={mode}
                 loaded={loaded}
-                onComplete={() => setLastResult(`${action.label} completed successfully.`)}
+                onComplete={async (value, message, completedAction) => {
+                  setLastResult(summarizeResult(value, message));
+                  if (completedAction.method !== "GET") {
+                    await loadData();
+                  }
+                }}
               />
             ))}
           </div>
