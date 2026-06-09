@@ -14,6 +14,7 @@ export type ActionField = {
   type?: "text" | "email" | "password" | "textarea" | "number" | "checkbox" | "select" | "file" | "date" | "datetime-local" | "json" | "tags";
   placeholder?: string;
   options?: Array<{ label: string; value: string }>;
+  required?: boolean;
   source?: {
     title: string;
     collection?: string;
@@ -45,6 +46,12 @@ type ModulePageProps = {
   mode?: "user" | "admin";
   loads?: LoadTarget[];
   actions?: ModuleAction[];
+};
+
+type LatestResult = {
+  title: string;
+  message: string;
+  data: unknown;
 };
 
 function defaultLoads(module: AppModule, mode: ApiMode): LoadTarget[] {
@@ -221,6 +228,111 @@ function summarizeResult(value: unknown, fallback: string) {
   return fallback;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isPrimitive(value: unknown) {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+
+function displayKey(value: string) {
+  return titleCase(value)
+    .replace(/\bC\b/g, "C")
+    .replace(/\bKph\b/g, "kph")
+    .replace(/\bMm\b/g, "mm")
+    .replace(/\bUrl\b/g, "URL")
+    .replace(/\bId\b/g, "ID")
+    .replace(/\bApi\b/g, "API")
+    .replace(/\bAi\b/g, "AI");
+}
+
+function displayValue(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "Not provided";
+  }
+
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  }
+
+  return String(value);
+}
+
+function primitiveEntries(record: Record<string, unknown>) {
+  return Object.entries(record).filter(([, value]) => isPrimitive(value));
+}
+
+function nestedEntries(record: Record<string, unknown>) {
+  return Object.entries(record).filter(([, value]) => value !== null && value !== undefined && !isPrimitive(value));
+}
+
+function ResultValue({ value, depth = 0 }: { value: unknown; depth?: number }) {
+  if (Array.isArray(value)) {
+    if (!value.length) {
+      return <p className="text-sm font-semibold text-charcoal/50">No records yet.</p>;
+    }
+
+    const primitivesOnly = value.every(isPrimitive);
+    if (primitivesOnly) {
+      return (
+        <div className="flex flex-wrap gap-2">
+          {value.map((item, index) => (
+            <span key={`${displayValue(item)}-${index}`} className="rounded-full bg-charcoal/[0.04] px-3 py-1 text-xs font-bold text-charcoal/58">
+              {displayValue(item)}
+            </span>
+          ))}
+        </div>
+      );
+    }
+
+    return (
+      <div className="grid gap-3 md:grid-cols-2">
+        {value.slice(0, 6).map((item, index) => (
+          <div key={isRecord(item) && item.id ? String(item.id) : index} className="rounded-2xl border border-black/[0.06] bg-white p-4">
+            <ResultValue value={item} depth={depth + 1} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (!isRecord(value)) {
+    return <p className="text-sm font-bold text-charcoal">{displayValue(value)}</p>;
+  }
+
+  const primitiveRows = primitiveEntries(value);
+  const nestedRows = nestedEntries(value);
+
+  return (
+    <div className="space-y-4">
+      {primitiveRows.length ? (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {primitiveRows.map(([key, entry]) => (
+            <div key={key} className="rounded-2xl bg-charcoal/[0.035] p-4">
+              <p className="text-[11px] font-black uppercase tracking-[0.14em] text-charcoal/40">{displayKey(key)}</p>
+              <p className="mt-2 break-words text-sm font-black text-charcoal">{displayValue(entry)}</p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {nestedRows.map(([key, entry]) => (
+        <div key={key} className={depth > 1 ? "space-y-3" : "rounded-3xl border border-black/[0.06] bg-charcoal/[0.02] p-4"}>
+          <h3 className="text-sm font-black text-charcoal">{displayKey(key)}</h3>
+          <div className="mt-3">
+            <ResultValue value={entry} depth={depth + 1} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ActionForm({
   action,
   onComplete,
@@ -265,7 +377,7 @@ function ActionForm({
         body: action.method === "GET" ? undefined : requestBody,
       });
 
-      setMessage(response.message);
+      setMessage("");
       await onComplete(response.data, response.message, action);
       if (action.method !== "GET") {
         form.reset();
@@ -293,12 +405,13 @@ function ActionForm({
             {field.type === "textarea" || field.type === "json" || field.type === "tags" ? (
               <textarea
                 name={field.name}
+                required={field.required}
                 placeholder={field.placeholder}
                 defaultValue={typeof field.defaultValue === "string" ? field.defaultValue : undefined}
                 className="mt-2 min-h-28 w-full rounded-2xl border border-black/10 bg-white px-4 py-3 text-sm text-charcoal outline-none transition placeholder:text-charcoal/35 focus:border-fuchsiaBrand"
               />
             ) : field.type === "select" || field.source ? (
-              <select name={field.name} defaultValue={typeof field.defaultValue === "string" ? field.defaultValue : ""} className={inputClass()}>
+              <select name={field.name} required={field.required} defaultValue={typeof field.defaultValue === "string" ? field.defaultValue : ""} className={inputClass()}>
                 <option value="">{field.source?.emptyLabel ?? "Choose..."}</option>
                 {fieldOptions(field, loaded).map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
@@ -313,6 +426,7 @@ function ActionForm({
               <input
                 name={field.name}
                 type={field.type ?? "text"}
+                required={field.required}
                 placeholder={field.placeholder}
                 defaultValue={typeof field.defaultValue === "string" ? field.defaultValue : undefined}
                 className={inputClass()}
@@ -419,7 +533,7 @@ export function ModulePage({ module, mode = "user", loads, actions = [] }: Modul
   const loadTargets = useMemo(() => loads ?? defaultLoads(module, mode), [loads, mode, module]);
   const [loaded, setLoaded] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
-  const [lastResult, setLastResult] = useState("");
+  const [lastResult, setLastResult] = useState<LatestResult | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -489,8 +603,20 @@ export function ModulePage({ module, mode = "user", loads, actions = [] }: Modul
 
             {lastResult ? (
               <Card className="p-5">
-                <h2 className="text-xl font-black text-charcoal">Latest update</h2>
-                <p className="mt-3 text-sm leading-7 text-charcoal/58">{lastResult}</p>
+                <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
+                  <div>
+                    <h2 className="text-xl font-black text-charcoal">Latest result</h2>
+                    <p className="mt-1 text-sm font-semibold text-charcoal/50">{lastResult.title}</p>
+                  </div>
+                  {lastResult.message ? (
+                    <span className="w-fit rounded-full bg-emerald-50 px-3 py-1 text-xs font-black text-emerald-700">
+                      {lastResult.message}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="mt-5">
+                  <ResultValue value={lastResult.data} />
+                </div>
               </Card>
             ) : null}
           </div>
@@ -503,7 +629,11 @@ export function ModulePage({ module, mode = "user", loads, actions = [] }: Modul
                 fallbackMode={mode}
                 loaded={loaded}
                 onComplete={async (value, message, completedAction) => {
-                  setLastResult(summarizeResult(value, message));
+                  setLastResult({
+                    title: summarizeResult(value, completedAction.label),
+                    message,
+                    data: value,
+                  });
                   if (completedAction.method !== "GET") {
                     await loadData();
                   }
